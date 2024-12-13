@@ -5,7 +5,7 @@ from tensorflow.keras.models import load_model
 import numpy as np
 
 # Load the trained model
-MODEL_PATH = "path_to_your_model/distracted_model.keras"
+MODEL_PATH = "distracted-16-0.99.keras"
 model = load_model(MODEL_PATH)
 
 # Define class labels
