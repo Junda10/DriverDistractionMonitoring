@@ -69,4 +69,4 @@ if start_webcam:
         st_frame.image(frame, channels="BGR")
 
     video_capture.release()
-    cv2.destroyAllWindows()
+    #cv2.destroyAllWindows()
