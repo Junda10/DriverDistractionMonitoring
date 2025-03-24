@@ -1,5 +1,9 @@
+opencv-python
+torch
+torchvision
+joblib
+pygame
 streamlit
-tensorflow
-opencv-python-headless
+ultralytics
+Pillow
 numpy
-ultralytics 
