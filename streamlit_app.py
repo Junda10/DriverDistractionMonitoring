@@ -9,6 +9,8 @@ import time
 from ultralytics import YOLO
 from PIL import Image
 import numpy as np
+import av
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
 
 # ---------------- Alert Sound ----------------
 pygame.mixer.init()
@@ -89,7 +91,7 @@ cnn_model = ImprovedCNN(num_classes=10).to(device)
 cnn_model.load_state_dict(torch.load("best_model_CNN_95.53.pth", map_location=device))
 cnn_model.eval()
 
-# Create Feature Extractor: Use conv_layers and explicitly flatten the output
+# Create Feature Extractor: Use conv_layers and flatten output
 feature_extractor = nn.Sequential(
     cnn_model.conv_layers,
     nn.Flatten()
@@ -99,7 +101,6 @@ feature_extractor = nn.Sequential(
 svm_model = joblib.load("svm_classifier_gridsearch.pkl")
 
 # ---------------- Image Preprocessing ----------------
-# For inference, we use deterministic transforms (no random augmentations)
 transform = transforms.Compose([
     transforms.ToPILImage(),
     transforms.Resize((224, 224)),
@@ -109,36 +110,17 @@ transform = transforms.Compose([
 ])
 
 st.set_page_config(page_title="Driver Monitoring System", page_icon="🚗", layout="wide")
-
-# Sidebar
-st.sidebar.title("ℹ️ About the App")
-st.sidebar.write("This system detects driver distractions using **YOLOv11 + CNN + SVM**.")
-st.sidebar.write("⚠️ **Alerts are triggered** if unsafe behaviors are detected.")
-
-# Title and Description
 st.markdown("<h1 style='text-align: center; color: #FF5733;'>🚗 Driver Behavior Monitoring</h1>", unsafe_allow_html=True)
 st.write("🔍 **Real-time driver distraction detection using AI models.**")
 
-# Buttons in a row
-col1, col2 = st.columns(2)
-start_webcam = col1.button("▶️ Start Webcam", key="start", help="Start the driver monitoring system")
-stop_webcam = col2.button("⏹️ Stop Webcam", key="stop", help="Stop the webcam feed")
+# ---------------- Video Transformer using streamlit-webrtc ----------------
+class VideoProcessor(VideoTransformerBase):
+    def transform(self, frame):
+        # Convert the frame to a NumPy array
+        img = frame.to_ndarray(format="bgr24")
 
-# Webcam Display
-stframe = st.empty()
-status_placeholder = st.empty()  # Status Message
-
-# ---------------- Main Processing ----------------
-if start_webcam:
-    cap = cv2.VideoCapture(0)
-
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            status_placeholder.error("🚫 Error: Cannot access webcam")
-            break
-
-        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Convert to RGB for processing
+        image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         results = yolo_model(image_rgb)
 
         detected_label = "Normal Driving"
@@ -153,100 +135,52 @@ if start_webcam:
                     person_boxes.append(box)
 
         if person_boxes:
-            # Select the box with the highest confidence
             best_box = max(person_boxes, key=lambda b: b.conf.item())
             x1, y1, x2, y2 = map(int, best_box.xyxy[0].tolist())
-            person_crop = image_rgb[y1:y2, x1:x2]
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)  # Default green rectangle
 
+            person_crop = image_rgb[y1:y2, x1:x2]
             if person_crop.shape[0] > 0 and person_crop.shape[1] > 0:
                 image_tensor = transform(person_crop).unsqueeze(0).to(device)
                 with torch.no_grad():
                     features = feature_extractor(image_tensor)
                 features = features.view(features.size(0), -1).cpu().numpy()
 
-                # Predict with SVM (without probabilities)
                 prediction = svm_model.predict(features)[0]
                 detected_label = class_labels[prediction]
 
-                # Set color based on behavior (green for normal, red otherwise)
+                # Change rectangle color based on detection
                 color = (0, 255, 0) if prediction == 0 else (0, 0, 255)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(frame, f"{detected_label}", (x1, y1 - 10), 
+                cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(img, f"{detected_label}", (x1, y1 - 10), 
                             cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
                 if prediction != 0:
                     alert_triggered = True
                     play_alert()
-                    time.sleep(3)
+                    time.sleep(0.5)  # Adjust delay if needed
+
         else:
             detected_label = "No person detected"
 
-        # Display status in Streamlit
-        if alert_triggered:
-            status_placeholder.error(f"🚨 **ALERT:** {detected_label} detected!")
-        else:
-            status_placeholder.success("✅ **Status: Normal Driving**")
+        # Optionally, display status text on the frame
+        cv2.putText(img, f"Status: {detected_label}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-        # Display webcam feed
-        stframe.image(frame, channels="BGR", use_column_width=True)
+# RTC configuration for streamlit-webrtc (using a public STUN server)
+rtc_configuration = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
 
-        if stop_webcam:
-            break
+# Start the WebRTC streamer
+webrtc_streamer(key="driver-monitoring", video_transformer_factory=VideoProcessor, rtc_configuration=rtc_configuration)
 
-    cap.release()
-    st.warning("🔴 Webcam Stopped.")
+# ---------------- Additional UI ----------------
+st.sidebar.title("ℹ️ About the App")
+st.sidebar.write("This system detects driver distractions using **YOLOv11 + CNN + SVM**.")
+st.sidebar.write("⚠️ **Alerts are triggered** if unsafe behaviors are detected.")
 
-#--------Upload Photo-------------------
-    st.subheader("Class Labels for Driver Behavior Classification:")
+st.subheader("Class Labels for Driver Behavior Classification:")
 for key, value in class_labels.items():
     st.write(f"**{key}: {value}**")
-
-# Upload Image
-uploaded_file = st.file_uploader("Upload an Image", type=["jpg", "png", "jpeg"])
-
-if uploaded_file is not None:
-    image = Image.open(uploaded_file)
-    image_rgb = np.array(image)
-    st.image(image, caption="Uploaded Image", use_column_width=True)
-
-    # --------------- YOLOv11: Person Detection ---------------
-    results = yolo_model(image_rgb)
-
-    # List to store all person detections
-    person_boxes = []
-
-    for result in results:
-        for box in result.boxes:
-            cls = int(box.cls.item())  # Get class ID
-            if cls == 0:  # Class ID 0 corresponds to "Person"
-                # Save the box and its confidence score
-                person_boxes.append(box)
-
-    if person_boxes:
-        # Select the box with the highest confidence
-        best_box = max(person_boxes, key=lambda b: b.conf.item())
-        x1, y1, x2, y2 = map(int, best_box.xyxy[0].tolist())
-
-        # Crop detected person
-        person_crop = image_rgb[y1:y2, x1:x2]
-
-        # Ensure it's not empty
-        if person_crop.shape[0] > 0 and person_crop.shape[1] > 0:
-            # Preprocess Image for Behavior Model
-            image_tensor = transform(person_crop).unsqueeze(0).to(device)
-
-            # Extract Features using CNN
-            with torch.no_grad():
-                features = feature_extractor(image_tensor)
-            features = features.view(features.size(0), -1).cpu().numpy()
-
-            # Predict with SVM
-            prediction = svm_model.predict(features)[0]
-            predicted_label = class_labels[prediction]
-
-            # Display Result
-            st.write(f"### 🚦 Predicted Activity: {predicted_label}")
-            # if prediction != 0:  # 0 corresponds to "Normal Driving"
-            #     play_alert()
-    else:
-        st.write("No person detected.")
