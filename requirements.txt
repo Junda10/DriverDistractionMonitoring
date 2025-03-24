@@ -7,3 +7,5 @@ streamlit
 ultralytics
 Pillow
 numpy
+av
+streamlit-webrtc
