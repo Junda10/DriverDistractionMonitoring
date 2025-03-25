@@ -9,9 +9,15 @@ from PIL import Image
 import numpy as np
 import av
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+from ultralytics import solutions
+
+inf = solutions.Inference(
+    model="yolo11n.pt",  # you can use any model that Ultralytics support, i.e. YOLO11, or custom trained model
+)
+
+inf.inference()
 
 # ---------------- Load Trained Models ----------------
-
 # Define CNN Model for Behavior Classification
 class ImprovedCNN(nn.Module):
     def __init__(self, num_classes=10):
@@ -111,98 +117,51 @@ st.markdown("<h1 style='text-align: center; color: #FF5733;'>🚗 Driver Behavio
 st.write("🔍 **Real-time driver distraction detection using AI models.**")
 
 # ---------------- Real-time Video with streamlit-webrtc ----------------# ---------------- Real-time Video with streamlit-webrtc ----------------
-# Debug log function
-def debug_log(message):
-    print(message)
-    # Optionally, write to a file or use st.write() in a placeholder if you want to see them in the app.
-
 # ---------------- Real-time Video Processing via streamlit-webrtc ----------------
 class VideoProcessor(VideoTransformerBase):
     def transform(self, frame):
         # Convert frame to NumPy array in BGR format
         img = frame.to_ndarray(format="bgr24")
-        debug_log("Frame received for processing. Shape: {}".format(img.shape))
-        
-        # Convert BGR to RGB
-        try:
-            image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        except Exception as e:
-            debug_log("Error in cvtColor: {}".format(e))
-            return av.VideoFrame.from_ndarray(img, format="bgr24")
-        
-        # Run YOLO detection
-        try:
-            results = yolo_model(image_rgb)
-            debug_log("YOLO results: {}".format(results))
-        except Exception as e:
-            debug_log("Error running YOLO: {}".format(e))
-            return av.VideoFrame.from_ndarray(img, format="bgr24")
-        
+        # Convert BGR to RGB for YOLO model
+        image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        results = yolo_model(image_rgb)
         detected_label = "Normal Driving"
+
+        # Collect person detections (assuming class 0 is 'person')
         person_boxes = []
-        
-        # Iterate over YOLO results and collect boxes for class 0 (person)
         for result in results:
-            debug_log("Processing a result...")
             for box in result.boxes:
-                try:
-                    cls = int(box.cls.item())
-                    conf = box.conf.item()
-                    debug_log("Detected class: {} with confidence: {}".format(cls, conf))
-                    if cls == 0:  # Check if this is a person
-                        person_boxes.append(box)
-                except Exception as e:
-                    debug_log("Error processing a box: {}".format(e))
-        
-        debug_log("Number of person boxes detected: {}".format(len(person_boxes)))
-        
+                cls = int(box.cls.item())
+                if cls == 0:
+                    person_boxes.append(box)
+
         if person_boxes:
-            # Select the box with highest confidence
             best_box = max(person_boxes, key=lambda b: b.conf.item())
-            try:
-                x1, y1, x2, y2 = map(int, best_box.xyxy[0].tolist())
-                debug_log("Best box coordinates: {} {} {} {}".format(x1, y1, x2, y2))
-                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            except Exception as e:
-                debug_log("Error getting box coordinates: {}".format(e))
-            
-            # Crop detected region
+            x1, y1, x2, y2 = map(int, best_box.xyxy[0].tolist())
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
             person_crop = image_rgb[y1:y2, x1:x2]
-            debug_log("Cropped person region shape: {}".format(person_crop.shape))
             if person_crop.shape[0] > 0 and person_crop.shape[1] > 0:
-                try:
-                    tensor = transform(person_crop).unsqueeze(0).to(device)
-                except Exception as e:
-                    debug_log("Error transforming person crop: {}".format(e))
-                    tensor = None
-                if tensor is not None:
-                    with torch.no_grad():
-                        features = feature_extractor(tensor)
-                    features = features.view(features.size(0), -1).cpu().numpy()
-                    try:
-                        prediction = svm_model.predict(features)[0]
-                        detected_label = class_labels[prediction]
-                        debug_log("Predicted behavior: {}".format(detected_label))
-                    except Exception as e:
-                        debug_log("Error in SVM prediction: {}".format(e))
-                        detected_label = "Error predicting"
-                    
-                    color = (0, 255, 0) if prediction == 0 else (0, 0, 255)
-                    cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(img, detected_label, (x1, y1 - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+                tensor = transform(person_crop).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    features = feature_extractor(tensor)
+                features = features.view(features.size(0), -1).cpu().numpy()
+                prediction = svm_model.predict(features)[0]
+                detected_label = class_labels[prediction]
+                color = (0, 255, 0) if prediction == 0 else (0, 0, 255)
+                cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(img, detected_label, (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
         else:
             detected_label = "No person detected"
-            debug_log("No person detected in this frame.")
-        
+
         cv2.putText(img, f"Status: {detected_label}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 rtc_configuration = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
-
 webrtc_streamer(key="driver-monitoring", video_transformer_factory=VideoProcessor,
                 rtc_configuration=rtc_configuration)
+
 
 # ---------------- Image Upload Processing ----------------
 st.subheader("Upload an Image for Driver Behavior Analysis")
