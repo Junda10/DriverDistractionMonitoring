@@ -8,9 +8,11 @@ from ultralytics import YOLO
 from PIL import Image
 import numpy as np
 import av
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
+import base64
+import os
+# ---------------- Model Definitions & Loading ----------------
 
-# ---------------- Load Trained Models ----------------
 # Define CNN Model for Behavior Classification
 class ImprovedCNN(nn.Module):
     def __init__(self, num_classes=10):
@@ -72,16 +74,18 @@ class_labels = {
     9: "Talking to Passenger"
 }
 
-# Load YOLO Model
-yolo_model = YOLO("yolo11n.pt")  # Make sure this file exists in your repo
+# Load YOLO Model (make sure the file exists)
+yolo_model = YOLO("yolo11n.pt")
+
+# Device configuration
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Load Pretrained CNN Model
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 cnn_model = ImprovedCNN(num_classes=10).to(device)
 cnn_model.load_state_dict(torch.load("best_model_CNN_95.53.pth", map_location=device))
 cnn_model.eval()
 
-# Create Feature Extractor: Use conv_layers and flatten output
+# Create Feature Extractor from CNN (using conv_layers)
 feature_extractor = nn.Sequential(
     cnn_model.conv_layers,
     nn.Flatten()
@@ -98,128 +102,295 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406],
                          std=[0.229, 0.224, 0.225])
 ])
+# ---------------- Video Functions ----------------
+def _overlay_text(img, texts):
+    """Overlay multiple lines of text on the image."""
+    y0, dy = 50, 20
+    for i, text in enumerate(texts):
+        y = y0 + i * dy
+        cv2.putText(img, text, (10, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
-st.set_page_config(page_title="Driver Monitoring System", page_icon="🚗", layout="wide")
-
-# Sidebar
-st.sidebar.title("ℹ️ About the App")
-st.sidebar.write("This system detects driver distractions using **YOLOv11 + CNN + SVM**.")
-st.sidebar.write("⚠️ **Alerts are triggered** if unsafe behaviors are detected.")
-
-st.markdown("<h1 style='text-align: center; color: #FF5733;'>🚗 Driver Behavior Monitoring</h1>", unsafe_allow_html=True)
-st.write("🔍 **Real-time driver distraction detection using AI models.**")
-
-# ---------------- Real-time Video with streamlit-webrtc ----------------# ---------------- Real-time Video with streamlit-webrtc ----------------
-# ---------------- Real-time Video Processing via streamlit-webrtc ----------------
-class VideoProcessor(VideoTransformerBase):
-    def transform(self, frame):
-        # Convert frame to NumPy array in BGR format
-        img = frame.to_ndarray(format="bgr24")
-        # Convert BGR to RGB for YOLO model
+def process_frame(img):
+    """Process a single frame (numpy array) and return the annotated frame."""
+    debug_text = [f"Frame shape: {img.shape}"]
+    try:
         image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        results = yolo_model(image_rgb)
-        detected_label = "Normal Driving"
+    except Exception as e:
+        debug_text.append(f"cvtColor error: {e}")
+        _overlay_text(img, debug_text)
+        return img
 
-        # Collect person detections (assuming class 0 is 'person')
-        person_boxes = []
-        for result in results:
-            for box in result.boxes:
+    try:
+        results = yolo_model(image_rgb)
+    except Exception as e:
+        debug_text.append(f"YOLO error: {e}")
+        _overlay_text(img, debug_text)
+        return img
+
+    detected_label = "Normal Driving"
+    person_boxes = []
+    # Process YOLO results for persons (assumed class 0)
+    for result in results:
+        for box in result.boxes:
+            try:
                 cls = int(box.cls.item())
                 if cls == 0:
                     person_boxes.append(box)
+            except Exception as e:
+                debug_text.append(f"Box processing error: {e}")
+    debug_text.append(f"Person boxes: {len(person_boxes)}")
+
+    if person_boxes:
+        best_box = max(person_boxes, key=lambda b: b.conf.item())
+        try:
+            x1, y1, x2, y2 = map(int, best_box.xyxy[0].tolist())
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        except Exception as e:
+            debug_text.append(f"Coordinate error: {e}")
+            x1 = y1 = x2 = y2 = 0
+        person_crop = image_rgb[y1:y2, x1:x2]
+        if person_crop.shape[0] > 0 and person_crop.shape[1] > 0:
+            try:
+                tensor = transform(person_crop).unsqueeze(0).to(device)
+            except Exception as e:
+                tensor = None
+            if tensor is not None:
+                try:
+                    with torch.no_grad():
+                        features = feature_extractor(tensor)
+                except Exception as e:
+                    debug_text.append(f"Feature extraction error: {e}")
+                    features = None
+                if features is not None:
+                    features = features.view(features.size(0), -1).cpu().numpy()
+                    try:
+                        prediction = svm_model.predict(features)[0]
+                        detected_label = class_labels[prediction]
+                    except Exception as e:
+                        debug_text.append(f"SVM error: {e}")
+                        detected_label = "Error predicting"
+                    color = (0, 255, 0) if prediction == 0 else (0, 0, 255)
+                    cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(img, detected_label, (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+    else:
+        detected_label = "No person detected"
+        debug_text.append("No person detected")
+
+    cv2.putText(img, f"Status: {detected_label}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    _overlay_text(img, debug_text)
+    return img
+# ---------------- Custom Video Processor for Live Tracking ----------------
+class VideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.frame_count = 0
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        self.frame_count += 1
+        img = frame.to_ndarray(format="bgr24")
+        debug_text = [f"Frame: {self.frame_count}, Shape: {img.shape}"]
+
+        # Convert BGR to RGB for YOLO
+        try:
+            image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        except Exception as e:
+            debug_text.append(f"cvtColor error: {e}")
+            self._overlay_text(img, debug_text)
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+        # Run YOLO detection
+        try:
+            results = yolo_model(image_rgb)
+        except Exception as e:
+            debug_text.append(f"YOLO error: {e}")
+            self._overlay_text(img, debug_text)
+            return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+        detected_label = "Normal Driving"
+        person_boxes = []
+        # Process YOLO results for persons (class 0)
+        for result in results:
+            for box in result.boxes:
+                try:
+                    cls = int(box.cls.item())
+                    conf = box.conf.item()
+                    if cls == 0:  # Person class
+                        person_boxes.append(box)
+                except Exception as e:
+                    debug_text.append(f"Box processing error: {e}")
+        debug_text.append(f"Person boxes: {len(person_boxes)}")
 
         if person_boxes:
             best_box = max(person_boxes, key=lambda b: b.conf.item())
-            x1, y1, x2, y2 = map(int, best_box.xyxy[0].tolist())
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            try:
+                x1, y1, x2, y2 = map(int, best_box.xyxy[0].tolist())
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            except Exception as e:
+                debug_text.append(f"Coordinate error: {e}")
+                x1 = y1 = x2 = y2 = 0
             person_crop = image_rgb[y1:y2, x1:x2]
+            
             if person_crop.shape[0] > 0 and person_crop.shape[1] > 0:
-                tensor = transform(person_crop).unsqueeze(0).to(device)
-                with torch.no_grad():
-                    features = feature_extractor(tensor)
-                features = features.view(features.size(0), -1).cpu().numpy()
-                prediction = svm_model.predict(features)[0]
-                detected_label = class_labels[prediction]
-                color = (0, 255, 0) if prediction == 0 else (0, 0, 255)
-                cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(img, detected_label, (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+                try:
+                    tensor = transform(person_crop).unsqueeze(0).to(device)
+                except Exception as e:
+                    tensor = None
+                if tensor is not None:
+                    try:
+                        with torch.no_grad():
+                            features = feature_extractor(tensor)
+                    except Exception as e:
+                        debug_text.append(f"Feature extraction error: {e}")
+                        features = None
+                    if features is not None:
+                        features = features.view(features.size(0), -1).cpu().numpy()
+                        try:
+                            prediction = svm_model.predict(features)[0]
+                            detected_label = class_labels[prediction]
+                        except Exception as e:
+                            debug_text.append(f"SVM error: {e}")
+                            detected_label = "Error predicting"
+                        color = (0, 255, 0) if prediction == 0 else (0, 0, 255)
+                        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                        cv2.putText(img, detected_label, (x1, y1 - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
         else:
             detected_label = "No person detected"
+            debug_text.append("No person detected")
 
         cv2.putText(img, f"Status: {detected_label}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        self._overlay_text(img, debug_text)
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-rtc_configuration = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
-webrtc_streamer(key="driver-monitoring", video_transformer_factory=VideoProcessor,
-                rtc_configuration=rtc_configuration)
+    def _overlay_text(self, img, texts):
+        y0, dy = 50, 20
+        for i, text in enumerate(texts):
+            y = y0 + i * dy
+            cv2.putText(img, text, (10, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
+# ---------------- Streamlit App Layout & Navigation ----------------
 
-# ---------------- Image Upload Processing ----------------
-st.subheader("Upload an Image for Driver Behavior Analysis")
-uploaded_file = st.file_uploader("Upload an Image", type=["jpg", "png", "jpeg"])
-import base64
-if uploaded_file is not None:
-    image = Image.open(uploaded_file)
-    image_rgb = np.array(image)
-    st.image(image, caption="Uploaded Image", use_column_width=True)
+# Set page config and sidebar navigation
+st.set_page_config(page_title="Driver Monitoring System", page_icon="🚗", layout="wide")
+st.sidebar.title("Navigation")
+page = st.sidebar.selectbox("Select Page", ["Main Page", "Detection Page"])
 
-    # --------------- YOLOv11: Person Detection ---------------
-    results = yolo_model(image_rgb)
+if page == "Main Page":
+    st.header("Project Overview")
+    st.write("""
+        **Driver Behavior Monitoring System**  
+        This project uses YOLOv11 for person detection combined with a custom CNN-SVM pipeline to identify driver distractions in real time.  
+        The system alerts the driver when unsafe behavior is detected.
+    """)
+    st.write("Use the **Detection Page** from the sidebar to access live tracking or image-based detection.")
 
-    # List to store all person detections
-    person_boxes = []
+elif page == "Detection Page":
+    st.header("Driver Distraction Detection")
+    detection_mode = st.selectbox("Select Detection Mode", ["Live Tracking", "Photos","Video Detection"])
 
-    for result in results:
-        for box in result.boxes:
-            cls = int(box.cls.item())  # Get class ID
-            if cls == 0:  # Class ID 0 corresponds to "Person"
-                # Save the box and its confidence score
-                person_boxes.append(box)
+    if detection_mode == "Live Tracking":
+        st.write("### Live Tracking")
+        st.write("This mode uses your webcam for real-time driver behavior monitoring.")
+        # Live Tracking using streamlit-webrtc
+        webrtc_streamer(
+            key="driver-monitoring",
+            video_processor_factory=VideoProcessor,
+            frontend_rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+            server_rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+        )
 
-    if person_boxes:
-        # Select the box with the highest confidence
-        best_box = max(person_boxes, key=lambda b: b.conf.item())
-        x1, y1, x2, y2 = map(int, best_box.xyxy[0].tolist())
+    elif detection_mode == "Photos":
+        st.write("### Photo Detection")
+        st.subheader("Upload an Image for Driver Behavior Analysis")
+        uploaded_file = st.file_uploader("Upload an Image", type=["jpg", "png", "jpeg"])
 
-        # Crop detected person
-        person_crop = image_rgb[y1:y2, x1:x2]
+        if uploaded_file is not None:
+            image = Image.open(uploaded_file)
+            image_rgb = np.array(image)
+            st.image(image, caption="Uploaded Image", use_column_width=True)
 
-        # Ensure it's not empty
-        if person_crop.shape[0] > 0 and person_crop.shape[1] > 0:
-            # Preprocess Image for Behavior Model
-            image_tensor = transform(person_crop).unsqueeze(0).to(device)
+            # YOLO detection on the uploaded image
+            results = yolo_model(image_rgb)
+            person_boxes = []
+            for result in results:
+                for box in result.boxes:
+                    try:
+                        cls = int(box.cls.item())
+                        if cls == 0:
+                            person_boxes.append(box)
+                    except Exception as e:
+                        st.write(f"Box processing error: {e}")
 
-            # Extract Features using CNN
-            with torch.no_grad():
-                features = feature_extractor(image_tensor)
-            features = features.view(features.size(0), -1).cpu().numpy()
+            if person_boxes:
+                best_box = max(person_boxes, key=lambda b: b.conf.item())
+                x1, y1, x2, y2 = map(int, best_box.xyxy[0].tolist())
+                person_crop = image_rgb[y1:y2, x1:x2]
 
-            # Predict with SVM
-            prediction = svm_model.predict(features)[0]
-            predicted_label = class_labels[prediction]
+                if person_crop.shape[0] > 0 and person_crop.shape[1] > 0:
+                    image_tensor = transform(person_crop).unsqueeze(0).to(device)
+                    with torch.no_grad():
+                        features = feature_extractor(image_tensor)
+                    features = features.view(features.size(0), -1).cpu().numpy()
+                    prediction = svm_model.predict(features)[0]
+                    predicted_label = class_labels[prediction]
+                    st.write(f"### 🚦 Predicted Activity: {predicted_label}")
 
-            # Display Result
-            st.write(f"### 🚦 Predicted Activity: {predicted_label}")
-            if prediction != 0:  # 0 corresponds to "Normal Driving"
-                with open("preview.mp3", "rb") as f:
-                    audio_bytes = f.read()
-                audio_b64 = base64.b64encode(audio_bytes).decode()
+                    if prediction != 0:  # Alert if not normal driving
+                        with open("preview.mp3", "rb") as f:
+                            audio_bytes = f.read()
+                        audio_b64 = base64.b64encode(audio_bytes).decode()
+                        audio_html = f"""
+                        <audio autoplay>
+                            <source src="data:audio/mp3;base64,{audio_b64}" type="audio/mp3">
+                        </audio>
+                        """
+                        st.markdown(audio_html, unsafe_allow_html=True)
+            else:
+                st.write("No person detected.")
+                
+    elif detection_mode == "Video Detection":
+        st.write("### Video Detection")
+        st.subheader("Upload a Video for Driver Behavior Analysis")
+        video_file = st.file_uploader("Upload a Video", type=["mp4", "mov", "avi"])
+        if video_file is not None:
+                # Save the video to a temporary file
+                tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                tfile.write(video_file.read())
+                tfile.close()
 
-                # Create an HTML audio element with autoplay enabled
-                audio_html = f"""
-                <audio autoplay>
-                    <source src="data:audio/mp3;base64,{audio_b64}" type="audio/mp3">
-                </audio>
-                """
+                cap = cv2.VideoCapture(tfile.name)
+                frames = []
+                frame_count = 0
+                st.info("Processing video, please wait...")
+                while cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    frame_count += 1
+                    annotated_frame = process_frame(frame)
+                    frames.append(annotated_frame)
+                cap.release()
 
-                # Render the HTML
-                st.markdown(audio_html, unsafe_allow_html=True)
-    else:
-        st.write("No person detected.")
+                if frames:
+                    height, width, _ = frames[0].shape
+                    output_path = os.path.join(tempfile.gettempdir(), "output_video.mp4")
+                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                    out = cv2.VideoWriter(output_path, fourcc, 20, (width, height))
+                    for f in frames:
+                        out.write(f)
+                    out.release()
+                    st.success(f"Video processed: {frame_count} frames.")
+                    st.video(output_path)
+                else:
+                    st.error("No frames were processed.")
+                os.unlink(tfile.name)    
+            
 
-# ---------------- Class Labels in Sidebar ----------------
+# ---------------- Sidebar: Class Labels ----------------
 st.sidebar.subheader("Class Labels for Driver Behavior Classification:")
 for key, value in class_labels.items():
     st.sidebar.write(f"**{key}: {value}**")
