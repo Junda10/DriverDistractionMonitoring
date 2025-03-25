@@ -89,7 +89,7 @@ feature_extractor = nn.Sequential(
 ).to(device)
 
 # Load Trained SVM Model
-svm_model = joblib.load("svm_classifier_gridsearch_95.53.pkl")
+svm_model = joblib.load("svm_classifier_gridsearch.pkl")
 
 # ---------------- Image Preprocessing ----------------
 transform = transforms.Compose([
