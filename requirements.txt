@@ -9,3 +9,4 @@ Pillow
 numpy
 av
 streamlit-webrtc
+scikit-learn
