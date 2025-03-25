@@ -312,7 +312,7 @@ elif page == "Detection Page":
         if uploaded_file is not None:
             image = Image.open(uploaded_file)
             image_rgb = np.array(image)
-            st.image(image, caption="Uploaded Image", use_column_width=True)
+            st.image(image, caption="Uploaded Image", use_container_width =True)
 
             # YOLO detection on the uploaded image
             results = yolo_model(image_rgb)
