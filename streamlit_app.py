@@ -9,13 +9,6 @@ from PIL import Image
 import numpy as np
 import av
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, RTCConfiguration
-from ultralytics import solutions
-
-inf = solutions.Inference(
-    model="yolo11n.pt",  # you can use any model that Ultralytics support, i.e. YOLO11, or custom trained model
-)
-
-inf.inference()
 
 # ---------------- Load Trained Models ----------------
 # Define CNN Model for Behavior Classification
