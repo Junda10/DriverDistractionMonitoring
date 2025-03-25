@@ -11,6 +11,7 @@ import av
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 import base64
 import os
+import tempfile
 # ---------------- Model Definitions & Loading ----------------
 
 # Define CNN Model for Behavior Classification
