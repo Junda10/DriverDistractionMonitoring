@@ -1,5 +1,4 @@
-av
-scikit-learn
+
 streamlit==1.22.0
 streamlit-webrtc==0.37.1
 torch==2.0.1
