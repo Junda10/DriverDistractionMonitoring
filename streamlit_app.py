@@ -115,21 +115,24 @@ def _overlay_text(img, texts):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
 def process_frame(img):
-    """Process a single frame (numpy array) and return the annotated frame."""
+    """
+    Process a single frame (numpy array) and return a tuple:
+    (annotated frame, predicted label)
+    """
     debug_text = [f"Frame shape: {img.shape}"]
     try:
         image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     except Exception as e:
         debug_text.append(f"cvtColor error: {e}")
         _overlay_text(img, debug_text)
-        return img
+        return img, "Error"
 
     try:
         results = yolo_model(image_rgb)
     except Exception as e:
         debug_text.append(f"YOLO error: {e}")
         _overlay_text(img, debug_text)
-        return img
+        return img, "Error"
 
     detected_label = "Normal Driving"
     person_boxes = []
@@ -184,7 +187,8 @@ def process_frame(img):
     cv2.putText(img, f"Status: {detected_label}", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
     _overlay_text(img, debug_text)
-    return img
+    return img, detected_label
+
 def summarize_detection_log(detection_log):
     """Summarize contiguous frame detections with the same activity.
     
