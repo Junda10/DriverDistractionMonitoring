@@ -8,5 +8,5 @@ ultralytics
 Pillow
 numpy
 av
-streamlit-webrtc==0.37.1
+streamlit-webrtc
 scikit-learn
