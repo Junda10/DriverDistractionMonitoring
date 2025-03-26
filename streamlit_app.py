@@ -12,7 +12,7 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 import base64
 import os
 import tempfile
-
+from collections import Counter
 # ---------------- Model Definitions & Loading ----------------
 
 # Define CNN Model for Behavior Classification
@@ -185,6 +185,31 @@ def process_frame(img):
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
     _overlay_text(img, debug_text)
     return img
+def summarize_detection_log(detection_log):
+    """Summarize contiguous frame detections with the same activity.
+    
+    Args:
+        detection_log (list of dict): Each dict has keys "Frame" and "Activity".
+        
+    Returns:
+        list of dict: Each dict has keys "Frame Range" and "Activity".
+    """
+    if not detection_log:
+        return []
+    summarized = []
+    current_activity = detection_log[0]["Activity"]
+    start_frame = detection_log[0]["Frame"]
+    end_frame = start_frame
+    for entry in detection_log[1:]:
+        if entry["Activity"] == current_activity:
+            end_frame = entry["Frame"]
+        else:
+            summarized.append({"Frame Range": f"{start_frame} - {end_frame}", "Activity": current_activity})
+            current_activity = entry["Activity"]
+            start_frame = entry["Frame"]
+            end_frame = start_frame
+    summarized.append({"Frame Range": f"{start_frame} - {end_frame}", "Activity": current_activity})
+    return summarized
 
 # ---------------- Custom Video Processor for Live Tracking ----------------
 class VideoProcessor(VideoProcessorBase):
@@ -367,18 +392,23 @@ elif page == "Detection Page":
 
             cap = cv2.VideoCapture(tfile.name)
             frames = []
+            detection_log = []  # List to store each frame's detection activity
             frame_count = 0
-            st.info("Processing video, please wait...")
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                frame_count += 1
-                annotated_frame = process_frame(frame)
-                frames.append(annotated_frame)
+
+            with st.spinner("Processing video, please wait..."):
+                while cap.isOpened():
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    frame_count += 1
+                    annotated_frame, pred = process_frame(frame)
+                    frames.append(annotated_frame)
+                    detection_log.append({"Frame": frame_count, "Activity": pred})
             cap.release()
 
             if frames:
+                summarized_log = summarize_detection_log(detection_log)
+                overall_pred = Counter([entry["Activity"] for entry in detection_log]).most_common(1)[0][0]
                 height, width, _ = frames[0].shape
                 output_path = os.path.join(tempfile.gettempdir(), "output_video.mp4")
                 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -387,7 +417,15 @@ elif page == "Detection Page":
                     out.write(f)
                 out.release()
                 st.success(f"Video processed: {frame_count} frames.")
-                st.video(output_path)
+                st.write(f"### Overall Predicted Activity for Video: {overall_pred}")
+                
+                # Read the video file as bytes and display it
+                with open(output_path, "rb") as f:
+                    video_bytes = f.read()
+                st.video(video_bytes)
+                
+                st.write("### Detection Log Summary:")
+                st.table(summarized_log)
             else:
                 st.error("No frames were processed.")
             os.unlink(tfile.name)
