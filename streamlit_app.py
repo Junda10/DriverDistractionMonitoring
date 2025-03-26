@@ -12,6 +12,7 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 import base64
 import os
 import tempfile
+
 # ---------------- Model Definitions & Loading ----------------
 
 # Define CNN Model for Behavior Classification
@@ -75,7 +76,7 @@ class_labels = {
     9: "Talking to Passenger"
 }
 
-# Load YOLO Model (make sure the file exists)
+# Load YOLO Model (ensure the file exists)
 yolo_model = YOLO("yolo11n.pt")
 
 # Device configuration
@@ -103,6 +104,7 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406],
                          std=[0.229, 0.224, 0.225])
 ])
+
 # ---------------- Video Functions ----------------
 def _overlay_text(img, texts):
     """Overlay multiple lines of text on the image."""
@@ -183,6 +185,7 @@ def process_frame(img):
                 cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
     _overlay_text(img, debug_text)
     return img
+
 # ---------------- Custom Video Processor for Live Tracking ----------------
 class VideoProcessor(VideoProcessorBase):
     def __init__(self):
@@ -275,7 +278,6 @@ class VideoProcessor(VideoProcessorBase):
 
 # ---------------- Streamlit App Layout & Navigation ----------------
 
-# Set page config and sidebar navigation
 st.set_page_config(page_title="Driver Monitoring System", page_icon="🚗", layout="wide")
 st.sidebar.title("Navigation")
 page = st.sidebar.selectbox("Select Page", ["Main Page", "Detection Page"])
@@ -291,17 +293,17 @@ if page == "Main Page":
 
 elif page == "Detection Page":
     st.header("Driver Distraction Detection")
-    detection_mode = st.selectbox("Select Detection Mode", ["Live Tracking", "Photos","Video Detection"])
+    detection_mode = st.selectbox("Select Detection Mode", ["Live Tracking", "Photos", "Video Detection"])
 
     if detection_mode == "Live Tracking":
         st.write("### Live Tracking")
         st.write("This mode uses your webcam for real-time driver behavior monitoring.")
-        # Live Tracking using streamlit-webrtc
+        # Modified webrtc_streamer call with media stream constraints.
         webrtc_streamer(
             key="driver-monitoring",
             video_processor_factory=VideoProcessor,
-            frontend_rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-            server_rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+            media_stream_constraints={"video": True, "audio": False},
+            frontend_rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
         )
 
     elif detection_mode == "Photos":
@@ -312,7 +314,7 @@ elif page == "Detection Page":
         if uploaded_file is not None:
             image = Image.open(uploaded_file)
             image_rgb = np.array(image)
-            st.image(image, caption="Uploaded Image", use_container_width =True)
+            st.image(image, caption="Uploaded Image", use_container_width=True)
 
             # YOLO detection on the uploaded image
             results = yolo_model(image_rgb)
@@ -358,38 +360,37 @@ elif page == "Detection Page":
         st.subheader("Upload a Video for Driver Behavior Analysis")
         video_file = st.file_uploader("Upload a Video", type=["mp4", "mov", "avi"])
         if video_file is not None:
-                # Save the video to a temporary file
-                tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-                tfile.write(video_file.read())
-                tfile.close()
+            # Save the video to a temporary file
+            tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+            tfile.write(video_file.read())
+            tfile.close()
 
-                cap = cv2.VideoCapture(tfile.name)
-                frames = []
-                frame_count = 0
-                st.info("Processing video, please wait...")
-                while cap.isOpened():
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
-                    frame_count += 1
-                    annotated_frame = process_frame(frame)
-                    frames.append(annotated_frame)
-                cap.release()
+            cap = cv2.VideoCapture(tfile.name)
+            frames = []
+            frame_count = 0
+            st.info("Processing video, please wait...")
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame_count += 1
+                annotated_frame = process_frame(frame)
+                frames.append(annotated_frame)
+            cap.release()
 
-                if frames:
-                    height, width, _ = frames[0].shape
-                    output_path = os.path.join(tempfile.gettempdir(), "output_video.mp4")
-                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                    out = cv2.VideoWriter(output_path, fourcc, 20, (width, height))
-                    for f in frames:
-                        out.write(f)
-                    out.release()
-                    st.success(f"Video processed: {frame_count} frames.")
-                    st.video(output_path)
-                else:
-                    st.error("No frames were processed.")
-                os.unlink(tfile.name)    
-            
+            if frames:
+                height, width, _ = frames[0].shape
+                output_path = os.path.join(tempfile.gettempdir(), "output_video.mp4")
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                out = cv2.VideoWriter(output_path, fourcc, 20, (width, height))
+                for f in frames:
+                    out.write(f)
+                out.release()
+                st.success(f"Video processed: {frame_count} frames.")
+                st.video(output_path)
+            else:
+                st.error("No frames were processed.")
+            os.unlink(tfile.name)
 
 # ---------------- Sidebar: Class Labels ----------------
 st.sidebar.subheader("Class Labels for Driver Behavior Classification:")
